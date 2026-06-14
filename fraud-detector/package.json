@@ -1,0 +1,12 @@
+{
+  "name": "fraud-detector",
+  "version": "1.0.0",
+  "description": "BPJS Fraud Detection Stream Processor",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "kafkajs": "^2.2.4"
+  }
+}
