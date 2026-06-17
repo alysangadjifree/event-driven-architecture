@@ -84,6 +84,9 @@ services:
     environment:
       KAFKA_BROKERS: kafka:9094
       PORT: 3001
+      DUCKDB_PATH: /var/lib/duckdb/fraud.db
+    volumes:
+      - duckdb_data:/var/lib/duckdb
     depends_on:
       kafka:
         condition: service_healthy
@@ -103,4 +106,6 @@ services:
 
 volumes:
   kafka_data:
+    driver: local
+  duckdb_data:
     driver: local

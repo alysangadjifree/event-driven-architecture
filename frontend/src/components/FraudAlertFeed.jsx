@@ -14,7 +14,7 @@ const RULE_LABEL = {
 
 export default function FraudAlertFeed({ alerts }) {
   return (
-    <div className="rounded-xl border border-red-900/40 bg-gray-900/50 p-4 flex flex-col h-full">
+    <div className="rounded-xl border border-red-900/40 bg-gray-900/50 p-4 flex flex-col h-[600px]">
       <h2 className="text-sm font-semibold text-red-400 uppercase tracking-wider mb-3">
         Fraud Alerts
       </h2>

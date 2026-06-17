@@ -1,4 +1,5 @@
 const { addAlert } = require("../state/statsStore");
+const { insertAlert } = require("../db/duckdb");
 
 async function startAlertsConsumer(consumer, broadcast) {
   await consumer.subscribe({ topic: "fraud-alerts", fromBeginning: false });
@@ -14,6 +15,7 @@ async function startAlertsConsumer(consumer, broadcast) {
     }
     addAlert(alert);
     broadcast({ type: "alert", data: alert });
+    insertAlert(alert).catch(() => {});
   };
 }
 

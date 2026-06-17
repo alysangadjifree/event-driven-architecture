@@ -1,10 +1,12 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useWebSocket } from "./hooks/useWebSocket";
 import ConnectionStatus from "./components/ConnectionStatus";
 import MetricCard from "./components/MetricCard";
 import ClaimFeed from "./components/ClaimFeed";
 import FraudAlertFeed from "./components/FraudAlertFeed";
 import TrendChart from "./components/TrendChart";
+import AnalyticsPanel from "./components/AnalyticsPanel";
+import DbExplorer from "./components/DbExplorer";
 
 const MAX_FEED = 50;
 
@@ -18,6 +20,8 @@ export default function App() {
   });
   const [claims, setClaims] = useState([]);
   const [alerts, setAlerts] = useState([]);
+  const [analytics, setAnalytics] = useState(null);
+  const [showExplorer, setShowExplorer] = useState(false);
 
   const handleMessage = useCallback((payload) => {
     switch (payload.type) {
@@ -30,10 +34,22 @@ export default function App() {
       case "alert":
         setAlerts((prev) => [payload.data, ...prev].slice(0, MAX_FEED));
         break;
+      case "analytics":
+        setAnalytics(payload.data);
+        break;
     }
   }, []);
 
   const connected = useWebSocket(handleMessage);
+
+  // Fetch analytics awal saat mount (sebelum WebSocket broadcast pertama tiba)
+  useEffect(() => {
+    const base = import.meta.env.VITE_API_URL || "http://localhost:3001";
+    fetch(`${base}/api/analytics/summary`)
+      .then((r) => r.json())
+      .then(setAnalytics)
+      .catch(() => {});
+  }, []);
 
   const formatRupiah = (n) => {
     if (n >= 1_000_000_000) return `Rp${(n / 1_000_000_000).toFixed(1)}M`;
@@ -57,7 +73,19 @@ export default function App() {
             Simulasi Real-Time Event-Driven Architecture
           </p>
         </div>
-        <ConnectionStatus connected={connected} />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setShowExplorer((v) => !v)}
+            className={`text-xs px-3 py-1.5 rounded-lg border transition-colors font-medium ${
+              showExplorer
+                ? "bg-emerald-800/40 border-emerald-500/40 text-emerald-300"
+                : "bg-gray-800/60 border-gray-700/50 text-gray-400 hover:text-gray-200 hover:border-gray-600"
+            }`}
+          >
+            {showExplorer ? "▼ DB Explorer" : "▶ DB Explorer"}
+          </button>
+          <ConnectionStatus connected={connected} />
+        </div>
       </header>
 
       {/* Metric Cards */}
@@ -89,15 +117,23 @@ export default function App() {
       </div>
 
       {/* Trend Chart */}
-      <div className="mb-6">
+      <div className="mb-4">
         <TrendChart trend={stats.trend} />
       </div>
 
-      {/* Live Feeds */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4" style={{ height: "400px" }}>
+      {/* DuckDB Analytics — tepat di bawah Trend Chart */}
+      <div className="mb-6">
+        <AnalyticsPanel analytics={analytics} />
+      </div>
+
+      {/* Live Feeds — scrollable ke bawah */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
         <ClaimFeed claims={claims} />
         <FraudAlertFeed alerts={alerts} />
       </div>
+
+      {/* DuckDB Explorer — collapsible */}
+      {showExplorer && <DbExplorer />}
     </div>
   );
 }

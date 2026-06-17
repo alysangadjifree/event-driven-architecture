@@ -1,6 +1,6 @@
 export default function ClaimFeed({ claims }) {
   return (
-    <div className="rounded-xl border border-gray-700/50 bg-gray-900/50 p-4 flex flex-col h-full">
+    <div className="rounded-xl border border-gray-700/50 bg-gray-900/50 p-4 flex flex-col h-[600px]">
       <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider mb-3">
         Live Feed Klaim
       </h2>

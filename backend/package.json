@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "cors": "^2.8.5",
+    "duckdb": "^1.1.0",
     "express": "^4.19.2",
     "kafkajs": "^2.2.4",
     "ws": "^8.17.1"

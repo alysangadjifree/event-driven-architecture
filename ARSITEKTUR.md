@@ -9,7 +9,8 @@
 6. [Model Data: Struktur Event Klaim](#6-model-data-struktur-event-klaim)
 7. [Cara Kerja Setiap Aturan Deteksi Fraud](#7-cara-kerja-setiap-aturan-deteksi-fraud)
 8. [Cara Kerja Dashboard Real-Time](#8-cara-kerja-dashboard-real-time)
-9. [Perbandingan: EDA vs Sistem Tradisional](#9-perbandingan-eda-vs-sistem-tradisional)
+9. [DuckDB Analytics Sink — Persistensi & Analitik](#9-duckdb-analytics-sink--persistensi--analitik)
+10. [Perbandingan: EDA vs Sistem Tradisional](#10-perbandingan-eda-vs-sistem-tradisional)
 
 ---
 
@@ -185,21 +186,28 @@ KRaft Mode (yang kita pakai):
 ║         ┌────┴────┐               ┌────┴────┐                               ║
 ║         │         │               │         │                               ║
 ║         ▼         ▼               └────►────┘                               ║
-║  ┌──────────┐  ┌──────────┐            │                                    ║
-║  │  FRAUD   │  │ BACKEND  │◄───────────┘                                    ║
-║  │ DETECTOR │  │   API    │                                                  ║
-║  │(Node.js) │  │(Node.js) │                                                  ║
-║  └────┬─────┘  └────┬─────┘                                                 ║
-║       │ publish     │ REST API (port 3001)                                   ║
-║       │ alerts      │ WebSocket (port 3001)                                  ║
-║       ▼             │                                                        ║
-║  fraud-alerts ──────┘                                                        ║
-║                     │                                                        ║
-║                     ▼                                                        ║
-║            ┌─────────────────┐                                               ║
-║            │  DASHBOARD UI   │  Browser: http://localhost:5173               ║
-║            │  (React + Vite) │  Update real-time via WebSocket               ║
-║            └─────────────────┘                                               ║
+║  ┌──────────┐  ┌──────────────────────────────────────┐                     ║
+║  │  FRAUD   │  │          BACKEND API                 │                     ║
+║  │ DETECTOR │  │           (Node.js)                  │                     ║
+║  │(Node.js) │  │                                      │                     ║
+║  └────┬─────┘  │  ┌──────────────────────────────┐   │                     ║
+║       │publish │  │  DuckDB (embedded, persisten) │   │                     ║
+║       │alerts  │  │  ┌──────────┐ ┌────────────┐ │   │                     ║
+║       ▼        │  │  │ claims   │ │fraud_alerts│ │   │                     ║
+║  fraud-alerts──┘  │  └──────────┘ └────────────┘ │   │                     ║
+║                   │  └──────────────────────────────┘   │                     ║
+║                   └──────────────────────────────────┘                     ║
+║                          │ REST API (port 3001)                             ║
+║                          │ WebSocket (port 3001)                            ║
+║                          ▼                                                  ║
+║            ┌─────────────────────────┐                                      ║
+║            │      DASHBOARD UI       │  Browser: http://localhost:5173      ║
+║            │     (React + Vite)      │                                      ║
+║            │  ┌─────────────────┐    │                                      ║
+║            │  │ Real-time feed  │    │  ← via WebSocket                     ║
+║            │  │ DuckDB Analytics│    │  ← via WebSocket + REST              ║
+║            │  └─────────────────┘    │                                      ║
+║            └─────────────────────────┘                                      ║
 ║                                                                              ║
 ║  ┌──────────────┐                                                            ║
 ║  │  KAFKA UI    │  Browser: http://localhost:8080                            ║
@@ -274,10 +282,18 @@ Langkah 4: Fraud Detector publish alert
 
 Langkah 5: Backend API consume kedua topik
 ──────────────────────────────────────────
-  → Consume "claims": simpan ke statsStore, broadcast via WebSocket
-  → Consume "fraud-alerts": update totalFraud, broadcast via WebSocket
+  → Consume "claims":
+      addClaim()              → simpan ke statsStore (in-memory)
+      broadcast("claim")     → push ke dashboard via WebSocket
+      insertClaim()          → tulis ke DuckDB tabel "claims"
 
-Langkah 6: Dashboard menerima update
+  → Consume "fraud-alerts":
+      addAlert()             → update totalFraud di statsStore
+      broadcast("alert")    → push ke dashboard via WebSocket
+      insertAlert()         → tulis ke DuckDB tabel "fraud_alerts"
+                              (1 baris per aturan yang terpicu)
+
+Langkah 6: Dashboard menerima update real-time
 ──────────────────────────────────────────
   WebSocket onmessage = (payload) => {
     if (payload.type === "alert") {
@@ -288,7 +304,20 @@ Langkah 6: Dashboard menerima update
       setStats(payload.data)
       // → Kartu metrik & grafik update
     }
+    if (payload.type === "analytics") {
+      setAnalytics(payload.data)
+      // → Panel DuckDB Analytics update (setiap 10 detik)
+    }
   }
+
+Langkah 7 (paralel): DuckDB siap diquery kapan saja
+──────────────────────────────────────────
+  GET /api/analytics/summary  → agregat keseluruhan dari DuckDB
+  GET /api/analytics/by-region → fraud per wilayah
+  GET /api/analytics/by-rule   → fraud per jenis aturan
+
+  → Data ini tetap ada meski container backend di-restart
+    (disimpan di Docker volume "duckdb_data")
 ```
 
 ---
@@ -409,31 +438,39 @@ State untuk aturan yang butuh **konteks historis** (windowed):
 
 ### 5.4 Backend API (`/backend`)
 
-**Tugas**: Jembatan antara Kafka dan Dashboard. Consume 2 topik, simpan ringkasan di memori, dan push update ke browser via WebSocket.
+**Tugas**: Jembatan antara Kafka dan Dashboard. Consume 2 topik, simpan ringkasan di memori, persist ke DuckDB, dan push update ke browser via WebSocket.
 
 ```
 backend/src/
 ├── index.js              ← Express server + WebSocketServer + Kafka consumer
 ├── consumers/
-│   ├── claimsConsumer.js     ← subscribe "claims" + panggil addClaim()
-│   └── alertsConsumer.js     ← subscribe "fraud-alerts" + panggil addAlert()
+│   ├── claimsConsumer.js     ← subscribe "claims" + addClaim() + insertClaim()
+│   └── alertsConsumer.js     ← subscribe "fraud-alerts" + addAlert() + insertAlert()
+├── db/
+│   └── duckdb.js             ← setup DuckDB, schema, fungsi insert & query
 ├── state/
 │   └── statsStore.js         ← state in-memory: total, recent[], trend[]
 └── routes/
-    └── stats.js              ← GET /api/stats, /recent-claims, /recent-alerts
+    ├── stats.js              ← GET /api/stats, /recent-claims, /recent-alerts
+    └── analytics.js          ← GET /api/analytics/summary, /by-region, /by-rule
 ```
 
 **Cara kerja WebSocket broadcast**:
 ```
 Kafka consumer menerima event
   │
-  ├── addClaim(claim) atau addAlert(alert)  ← update state lokal
+  ├── addClaim(claim) / addAlert(alert)  ← update state lokal (in-memory)
+  ├── insertClaim(claim) / insertAlert() ← persist ke DuckDB (async, fire-and-forget)
   │
-  └── broadcast({ type: "claim", data: claim })
-        │
-        └── wss.clients.forEach(client => client.send(JSON.stringify(payload)))
-              ↑
-              └── semua browser yang sedang buka dashboard menerima update ini
+  └── broadcast({ type: "claim" | "alert", data })
+        └── semua browser yang sedang buka dashboard menerima update ini
+
+Setiap 1 detik:
+  broadcast({ type: "stats", data: getStats() })
+
+Setiap 10 detik:
+  const analytics = await queryAnalytics()   ← query DuckDB
+  broadcast({ type: "analytics", data: analytics })
 ```
 
 **Endpoint REST**:
@@ -441,21 +478,23 @@ Kafka consumer menerima event
 GET /api/stats
 → { totalClaims, totalFraud, totalRiskAmount, throughput, trend[] }
 
-GET /api/recent-claims
-→ [ ...50 klaim terbaru ]
+GET /api/recent-claims       → [ ...50 klaim terbaru ]
+GET /api/recent-alerts       → [ ...50 fraud alert terbaru ]
 
-GET /api/recent-alerts
-→ [ ...50 fraud alert terbaru ]
+GET /api/analytics/summary
+→ { totalClaims, totalAlerts, totalRiskAmount, byRegion[], byRule[] }
 
-GET /health
-→ { status: "ok" }
+GET /api/analytics/by-region → [ { region, count } ... ] dari DuckDB
+GET /api/analytics/by-rule   → [ { rule_name, severity, count } ... ] dari DuckDB
+
+GET /health                  → { status: "ok" }
 ```
 
 ---
 
 ### 5.5 Dashboard UI (`/frontend`)
 
-**Tugas**: Menampilkan data secara visual dan real-time di browser.
+**Tugas**: Menampilkan data secara visual dan real-time di browser — baik data streaming (in-memory) maupun data historis (DuckDB).
 
 ```
 frontend/src/
@@ -467,7 +506,8 @@ frontend/src/
     ├── ClaimFeed.jsx         ← Live scroll 50 klaim terbaru
     ├── FraudAlertFeed.jsx    ← Live scroll 50 alert terbaru + badge severity
     ├── TrendChart.jsx        ← Area chart Recharts (claims vs fraud per menit)
-    └── ConnectionStatus.jsx  ← Dot hijau/merah + auto-reconnect 3 detik
+    ├── ConnectionStatus.jsx  ← Dot hijau/merah + auto-reconnect 3 detik
+    └── AnalyticsPanel.jsx    ← Panel DuckDB: summary card, bar chart, tabel
 ```
 
 **Alur state di React**:
@@ -475,9 +515,14 @@ frontend/src/
 useWebSocket(handleMessage)
   ↓ WebSocket message masuk
 handleMessage(payload)
-  ├── type: "stats"  → setStats(payload.data)   → MetricCard + TrendChart re-render
-  ├── type: "claim"  → setClaims(prev => [data, ...prev].slice(0, 50))  → ClaimFeed
-  └── type: "alert"  → setAlerts(prev => [data, ...prev].slice(0, 50)) → FraudAlertFeed
+  ├── type: "stats"     → setStats(data)      → MetricCard + TrendChart re-render
+  ├── type: "claim"     → setClaims(...)      → ClaimFeed
+  ├── type: "alert"     → setAlerts(...)      → FraudAlertFeed
+  └── type: "analytics" → setAnalytics(data) → AnalyticsPanel re-render
+
+useEffect (mount sekali)
+  → fetch GET /api/analytics/summary   ← data awal dari DuckDB sebelum WS update
+  → setAnalytics(data)
 ```
 
 ---
@@ -697,6 +742,7 @@ Browser                              Backend (ws://localhost:3001)
 | `stats` | Setiap 1 detik (interval) | MetricCard, TrendChart |
 | `claim` | Setiap ada klaim baru dari Kafka | ClaimFeed |
 | `alert` | Setiap ada fraud alert dari Kafka | FraudAlertFeed, MetricCard |
+| `analytics` | Setiap 10 detik (query DuckDB) | AnalyticsPanel |
 
 ### Grafik Tren (TrendChart)
 
@@ -715,7 +761,116 @@ State trend[] di statsStore:
 
 ---
 
-## 9. Perbandingan: EDA vs Sistem Tradisional
+## 9. DuckDB Analytics Sink — Persistensi & Analitik
+
+### Mengapa DuckDB?
+
+Semua state di Fraud Detector dan Backend bersifat **in-memory** — data hilang saat container restart. DuckDB hadir sebagai lapisan kedua yang **mempersistensikan semua event** ke file database yang tersimpan di Docker volume.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                  Dua Jalur Paralel di Backend                     │
+│                                                                   │
+│  Kafka message masuk                                              │
+│       │                                                           │
+│       ├─── statsStore (in-memory) ───► WebSocket broadcast       │
+│       │    ↑ Cepat, hilang saat restart                          │
+│       │                                                           │
+│       └─── DuckDB (disk, persistent) ──► /api/analytics/*        │
+│            ↑ Sedikit lebih lambat, TETAP ADA meski restart        │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**DuckDB** adalah *embedded analytical database* — seperti SQLite, tapi dioptimalkan untuk query analitik (agregasi, GROUP BY, window functions) bukan transaksi OLTP. Tidak butuh server terpisah; DuckDB berjalan sebagai library di dalam proses Node.js backend.
+
+### Skema Tabel DuckDB
+
+**Tabel `claims`** — setiap klaim yang masuk dari Kafka:
+```sql
+claim_id     VARCHAR PRIMARY KEY
+peserta_id   VARCHAR
+faskes_id    VARCHAR
+faskes_name  VARCHAR
+faskes_type  VARCHAR           -- FKTP atau FKRTL
+diagnosis_code VARCHAR
+procedure_code VARCHAR
+claim_amount DOUBLE
+service_date VARCHAR
+submitted_at VARCHAR
+region       VARCHAR
+is_anomaly   BOOLEAN
+anomaly_type VARCHAR
+inserted_at  TIMESTAMP         -- waktu data masuk ke DuckDB
+```
+
+**Tabel `fraud_alerts`** — satu baris per aturan yang terpicu:
+```sql
+id           VARCHAR PRIMARY KEY  -- alert_id + ':' + rule_name
+alert_id     VARCHAR
+claim_id     VARCHAR
+peserta_id   VARCHAR
+faskes_id    VARCHAR
+faskes_name  VARCHAR
+claim_amount DOUBLE
+region       VARCHAR
+rule_name    VARCHAR    -- duplicate_claim, abnormal_amount, dll.
+severity     VARCHAR    -- HIGH, MEDIUM, LOW
+reason       VARCHAR
+detected_at  VARCHAR
+inserted_at  TIMESTAMP
+```
+
+> **Catatan desain**: Satu `alert_id` bisa memicu beberapa aturan sekaligus. Kita menyimpan satu baris per aturan sehingga query `GROUP BY rule_name` menjadi langsung.
+
+### Persistensi via Docker Volume
+
+```yaml
+# docker-compose.yml
+services:
+  backend:
+    volumes:
+      - duckdb_data:/var/lib/duckdb
+
+volumes:
+  duckdb_data:
+    driver: local
+```
+
+- File database: `/var/lib/duckdb/fraud.db` di dalam container
+- Volume `duckdb_data` tetap ada selama tidak dijalankan `docker compose down -v`
+- Restart `docker compose restart backend` → data tidak hilang
+
+### Query Analitik yang Tersedia
+
+```sql
+-- Fraud per wilayah (tampil di bar chart dashboard)
+SELECT region, COUNT(*) AS count
+FROM (SELECT DISTINCT alert_id, region FROM fraud_alerts)
+GROUP BY region ORDER BY count DESC;
+
+-- Fraud per jenis aturan (tampil di tabel dashboard)
+SELECT rule_name, severity, COUNT(*) AS count
+FROM fraud_alerts
+GROUP BY rule_name, severity ORDER BY count DESC;
+
+-- Total klaim & alert tersimpan (summary card)
+SELECT COUNT(*) FROM claims;
+SELECT COUNT(DISTINCT alert_id), SUM(claim_amount) FROM fraud_alerts;
+```
+
+### Perbandingan: In-Memory vs DuckDB
+
+| Aspek | statsStore (in-memory) | DuckDB (persistent) |
+|---|---|---|
+| Kecepatan baca | Nano-detik | Mili-detik |
+| Persistensi | Hilang saat restart | Tetap ada di volume |
+| Tipe query | Counter + array sederhana | SQL penuh: GROUP BY, JOIN, dll. |
+| Cocok untuk | Feed real-time, metrik langsung | Laporan historis, analitik |
+| Kapasitas | Terbatas RAM | Terbatas disk |
+
+---
+
+## 10. Perbandingan: EDA vs Sistem Tradisional
 
 ### Sistem Tradisional (Batch/Polling)
 

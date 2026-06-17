@@ -1,4 +1,5 @@
 const { addClaim } = require("../state/statsStore");
+const { insertClaim } = require("../db/duckdb");
 
 async function startClaimsConsumer(consumer, broadcast) {
   await consumer.subscribe({ topic: "claims", fromBeginning: false });
@@ -16,6 +17,7 @@ async function startClaimsConsumer(consumer, broadcast) {
     }
     addClaim(claim);
     broadcast({ type: "claim", data: claim });
+    insertClaim(claim).catch(() => {});
   };
 }
 

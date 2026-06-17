@@ -4,6 +4,8 @@ const { WebSocketServer } = require("ws");
 const { Kafka } = require("kafkajs");
 const cors = require("cors");
 const statsRouter = require("./routes/stats");
+const analyticsRouter = require("./routes/analytics");
+const { initDB, queryAnalytics } = require("./db/duckdb");
 const { startClaimsConsumer } = require("./consumers/claimsConsumer");
 const { startAlertsConsumer } = require("./consumers/alertsConsumer");
 
@@ -15,6 +17,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use("/api", statsRouter);
+app.use("/api/analytics", analyticsRouter);
 
 app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
@@ -45,6 +48,14 @@ setInterval(() => {
   broadcast({ type: "stats", data: getStats() });
 }, 1000);
 
+// Push analytics dari DuckDB setiap 10 detik ke semua client
+setInterval(async () => {
+  try {
+    const data = await queryAnalytics();
+    broadcast({ type: "analytics", data });
+  } catch {}
+}, 10_000);
+
 // ─── Kafka ────────────────────────────────────────────────────────────────────
 const kafka = new Kafka({
   clientId: "fraud-backend",
@@ -71,6 +82,12 @@ async function startKafka() {
 server.listen(PORT, async () => {
   console.log(`[backend] HTTP + WebSocket server berjalan di port ${PORT}`);
   console.log(`[backend] REST API: http://localhost:${PORT}/api/stats`);
+  try {
+    await initDB();
+  } catch (err) {
+    console.error("[backend] Gagal inisialisasi DuckDB:", err.message);
+    process.exit(1);
+  }
   try {
     await startKafka();
   } catch (err) {
