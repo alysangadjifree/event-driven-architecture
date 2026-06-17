@@ -1,12 +1,26 @@
 # EDA Fraud Detection — Simulasi Real-Time BPJS Kesehatan
 
-Simulasi **end-to-end fraud detection real-time** berbasis Event-Driven Architecture (EDA) dengan Apache Kafka, mengacu pada pola transaksi klaim layanan kesehatan nasional (BPJS Kesehatan / JKN).
+Simulasi **end-to-end fraud detection real-time** berbasis Event-Driven Architecture (EDA) dengan Apache Kafka dan DuckDB, mengacu pada pola transaksi klaim layanan kesehatan nasional (BPJS Kesehatan / JKN).
 
 ```
 [Generator]  →  Kafka: claims  →  [Fraud Detector]  →  Kafka: fraud-alerts
                                                                  ↓
                                           [Backend API + WebSocket]  →  [Dashboard UI]
+                                                    ↓
+                                               [DuckDB]  →  Analytics + DB Explorer
 ```
+
+---
+
+## Fitur Utama
+
+| Fitur | Keterangan |
+|---|---|
+| **Real-time Fraud Detection** | 5 aturan fraud berjalan per event, latensi < 500ms end-to-end |
+| **Live Dashboard** | WebSocket push — feed klaim, fraud alerts, grafik tren per menit |
+| **DuckDB Analytics Sink** | Setiap klaim & alert disimpan persisten ke DuckDB (survive restart) |
+| **Analytics Panel** | Bar chart fraud per wilayah, breakdown per rule dengan progress bar |
+| **DB Explorer** | Query SQL langsung ke DuckDB dari browser, schema browser, 5 preset query |
 
 ---
 
@@ -34,6 +48,8 @@ cd event-driven-architecture
 
 Script ini otomatis membuat `.env` dari `.env.example` dan menjalankan `docker compose up -d --build`.
 
+> **Build pertama kali** membutuhkan ~5–8 menit karena mengunduh image dan mengkompilasi native addon DuckDB.
+
 ### 3. Buka di browser
 
 | Service | URL |
@@ -41,13 +57,14 @@ Script ini otomatis membuat `.env` dari `.env.example` dan menjalankan `docker c
 | **Dashboard UI** | http://localhost:5173 |
 | **Kafka UI** | http://localhost:8080 |
 | **Backend API** | http://localhost:3001/api/stats |
+| **Analytics API** | http://localhost:3001/api/analytics/summary |
 
 ### 4. Berhenti
 ```bash
 ./scripts/stop.sh
 ```
 
-> Untuk menghapus semua data Kafka juga: `docker compose down -v`
+> Data Kafka **dan** DuckDB tetap tersimpan setelah stop. Untuk hapus semua: `docker compose down -v`
 
 ---
 
@@ -79,25 +96,67 @@ Edit file `.env` untuk menyesuaikan:
 
 ### 3. Backend API (`/backend`)
 - Consume kedua topik Kafka
-- REST API: `GET /api/stats`, `GET /api/recent-claims`, `GET /api/recent-alerts`
+- Tulis setiap event ke **DuckDB** secara async (persistent sink)
+- REST API: stats, recent claims/alerts, analytics, SQL query endpoint
 - WebSocket di port 3001 untuk push real-time ke dashboard
 
-### 4. Dashboard UI (`/frontend`)
+### 4. DuckDB (`embedded di backend`)
+- Database analitik embedded — tidak perlu container terpisah
+- Tabel: `claims` dan `fraud_alerts`
+- Data tersimpan di Docker volume `duckdb_data` (survive restart)
+- Diquery via `GET /api/analytics/*` dan `POST /api/analytics/query`
+
+### 5. Dashboard UI (`/frontend`)
 - React + Vite + Recharts + Tailwind CSS
-- Live feed transaksi & fraud alerts
-- Grafik tren & kartu metrik real-time
+- Live feed transaksi & fraud alerts (scroll 50 item)
+- Grafik tren per menit & kartu metrik real-time
+- **Analytics Panel** — data historis dari DuckDB (update tiap 10 detik)
+- **DB Explorer** — SQL query UI dengan schema browser dan preset query
 
 ---
 
 ## Aturan Deteksi Fraud
 
-| Rule | Logika |
-|---|---|
-| `duplicate_claim` | `peserta_id + procedure_code + service_date` sama dalam window 5 menit |
-| `abnormal_amount` | `claim_amount > 3× median` historis per `procedure_code` |
-| `high_frequency` | `peserta_id` mengajukan > 5 klaim dalam 1 jam |
-| `inconsistent_diagnosis` | `procedure_code` tidak valid untuk `diagnosis_code` berdasarkan mapping ICD-10 |
-| `faskes_spike` | Satu `faskes_id` volume klaim > 3× baseline dalam 10 menit |
+| Rule | Severity | Logika |
+|---|---|---|
+| `duplicate_claim` | HIGH | `peserta_id + procedure_code + service_date` sama dalam window 5 menit |
+| `abnormal_amount` | MEDIUM | `claim_amount > 3× median` historis per `procedure_code` |
+| `high_frequency` | HIGH | `peserta_id` mengajukan > 5 klaim dalam 1 jam |
+| `inconsistent_diagnosis` | MEDIUM | `procedure_code` tidak valid untuk `diagnosis_code` (mapping ICD-10) |
+| `faskes_spike` | HIGH | Satu `faskes_id` volume klaim > 3× baseline dalam 10 menit |
+
+---
+
+## REST API
+
+```bash
+# Statistik real-time (in-memory)
+GET /api/stats
+GET /api/recent-claims
+GET /api/recent-alerts
+
+# Analytics dari DuckDB
+GET  /api/analytics/summary
+GET  /api/analytics/by-region
+GET  /api/analytics/by-rule
+GET  /api/analytics/schema
+
+# SQL Explorer (hanya SELECT)
+POST /api/analytics/query
+     body: { "sql": "SELECT * FROM claims LIMIT 10" }
+```
+
+---
+
+## DB Explorer
+
+Klik tombol **"▶ DB Explorer"** di header dashboard untuk membuka SQL explorer:
+
+- **Schema browser** — klik nama tabel/kolom untuk insert ke query
+- **Preset queries** — 10 Klaim Terbaru, 10 Alert Terbaru, Fraud per Wilayah, Fraud per Rule, Klaim Anomali
+- **SQL textarea** — tulis query manual, `Ctrl+Enter` untuk jalankan
+- **Hasil** — tabel scrollable dengan jumlah baris dan waktu eksekusi
+- Hanya query `SELECT / SHOW / DESCRIBE` yang diizinkan
 
 ---
 
@@ -117,11 +176,13 @@ event-driven-architecture/
 ├── docker-compose.yml
 ├── .env.example
 ├── README.md
+├── ARSITEKTUR.md       # Dokumentasi arsitektur lengkap
+├── PANDUAN.md          # Panduan penggunaan lengkap
 ├── scripts/
 │   ├── start.sh
 │   └── stop.sh
 ├── generator/          # Transaction Generator (Node.js + KafkaJS)
 ├── fraud-detector/     # Fraud Detector (Node.js + KafkaJS)
-├── backend/            # API + WebSocket (Express + ws)
-└── frontend/           # Dashboard (React + Vite + Recharts)
+├── backend/            # API + WebSocket + DuckDB (Express + ws + duckdb)
+└── frontend/           # Dashboard (React + Vite + Recharts + Tailwind)
 ```
