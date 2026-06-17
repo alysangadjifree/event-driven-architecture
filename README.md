@@ -1,4 +1,4 @@
-# EDA Fraud Detection — Simulasi Real-Time BPJS Kesehatan
+# EDA Fraud Detection — Simulasi Real-Time Health System
 
 Simulasi **end-to-end fraud detection real-time** berbasis Event-Driven Architecture (EDA) dengan Apache Kafka dan DuckDB, mengacu pada pola transaksi klaim layanan kesehatan nasional (BPJS Kesehatan / JKN).
 
@@ -9,6 +9,47 @@ Simulasi **end-to-end fraud detection real-time** berbasis Event-Driven Architec
                                                     ↓
                                                [DuckDB]  →  Analytics + DB Explorer
 ```
+
+---
+
+## Mengapa EDA Lebih Unggul dari Sync API?
+
+Project ini secara langsung mendemonstrasikan keunggulan Event-Driven Architecture dibanding pendekatan request-response (REST/polling) tradisional. Berikut perbandingannya berdasarkan implementasi nyata di sini:
+
+### Decoupling — Komponen Tidak Saling Bergantung
+
+- **Sync API:** Generator harus tahu alamat fraud detector, menunggu respons, lalu menunggu lagi respons dari backend. Jika satu service down, seluruh aliran berhenti.
+- **EDA di sini:** Generator hanya `publish` ke topik Kafka `claims`. Fraud detector, backend, dan sink DuckDB consume secara independen — satu service restart tidak memblokir yang lain.
+
+### Throughput Tinggi Tanpa Bottleneck
+
+- **Sync API:** Setiap klaim butuh 2–3 round-trip HTTP (generator → detector → backend). Throughput dibatasi oleh service paling lambat.
+- **EDA di sini:** Kafka sebagai broker menampung burst event. Generator bisa terus publish meski fraud detector sedang sibuk — backlog diproses saat kapasitas tersedia tanpa kehilangan satu pun event.
+
+### Latensi Ujung-ke-Ujung yang Terpisah dari Latensi Pemroses
+
+- **Sync API:** Client menunggu sampai seluruh pipeline (detect + simpan + kirim notifikasi) selesai sebelum bisa kirim request berikutnya.
+- **EDA di sini:** Generator publish-dan-lanjut (`fire-and-forget`). Dashboard menerima alert via WebSocket `< 500ms` setelah fraud terdeteksi, tanpa memblokir generator sama sekali.
+
+### Persistensi dan Replay Event
+
+- **Sync API:** Jika backend down saat klaim dikirim, data hilang — tidak ada mekanisme replay bawaan.
+- **EDA di sini:** Kafka menyimpan semua event di topik `claims` dan `fraud-alerts`. Service yang restart langsung resume dari offset terakhir, tidak ada data yang terlewat. DuckDB sebagai sink mencatat riwayat lengkap untuk analitik historis.
+
+### Skalabilitas Horizontal yang Mudah
+
+- **Sync API:** Scale fraud detector berarti load balancer baru, konfigurasi sticky session, dan koordinasi state antar instance.
+- **EDA di sini:** Tambah consumer fraud detector = tambah consumer group member Kafka. Partisi topik otomatis terdistribusi — tidak perlu ubah konfigurasi generator atau backend.
+
+### Multiple Consumer Tanpa Perubahan Producer
+
+- **Sync API:** Menambah fitur baru (misal: logging ke data warehouse) berarti modifikasi endpoint fraud detector atau menambah pemanggil HTTP baru di pipeline.
+- **EDA di sini:** Cukup tambah consumer baru yang subscribe ke topik `claims` atau `fraud-alerts`. Generator dan fraud detector tidak perlu tahu ada consumer baru — zero code change pada service yang sudah ada.
+
+### Observabilitas Built-in
+
+- **Sync API:** Debugging aliran data butuh distributed tracing khusus (Jaeger, Zipkin) yang harus diintegrasikan manual.
+- **EDA di sini:** Kafka UI (`localhost:8080`) menampilkan setiap event di topik secara real-time — bisa inspect payload, offset, lag consumer, dan throughput tanpa instrumentasi tambahan.
 
 ---
 
